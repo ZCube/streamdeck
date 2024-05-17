@@ -39,7 +39,12 @@ var (
 				return err
 			}
 
-			return d.SetImage(uint8(key), resize.Resize(d.Pixels, d.Pixels, img, resize.Lanczos3))
+			err = d.SetImage(uint8(key), resize.Resize(d.GetPixels(), d.GetPixels(), img, resize.Lanczos3))
+			if err != nil {
+				return err
+			}
+
+			return d.Flush()
 		},
 	}
 )

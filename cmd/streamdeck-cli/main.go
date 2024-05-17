@@ -19,7 +19,7 @@ var (
 		PersistentPostRunE: closeStreamDeck,
 	}
 
-	d streamdeck.Device
+	d streamdeck.DeviceInterface
 )
 
 func closeStreamDeck(cmd *coral.Command, args []string) error {

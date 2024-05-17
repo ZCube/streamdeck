@@ -6,7 +6,11 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+
 	"image/jpeg"
+	// "github.com/pixiv/go-libjpeg/jpeg"
+
+	"image/png"
 	"math"
 	"sync"
 	"time"
@@ -24,6 +28,8 @@ const (
 //
 //nolint:revive
 const (
+	VID_AJAZZ               = 0x5548
+	PID_AKP153              = 0x6674
 	VID_ELGATO              = 0x0fd9
 	PID_STREAMDECK          = 0x0060
 	PID_STREAMDECK_V2       = 0x006d
@@ -74,7 +80,7 @@ type Device struct {
 
 	keyState []byte
 
-	device *hid.Device
+	device hid.Device
 	info   hid.DeviceInfo
 
 	lastActionTime time.Time
@@ -94,16 +100,35 @@ type Key struct {
 }
 
 // Devices returns all attached Stream Decks.
-func Devices() ([]Device, error) {
-	dd := []Device{}
+func Devices() ([]DeviceInterface, error) {
+	dd := []DeviceInterface{}
 
-	devs := hid.Enumerate(VID_ELGATO, 0)
+	devs, err := hid.Enumerate(0, 0)
+	if err != nil {
+		return nil, err
+	}
 	for _, d := range devs {
-		var dev Device
+		var dev DeviceInterface
 
 		switch {
+		case d.VendorID == VID_AJAZZ && d.ProductID == PID_AKP153:
+			dev = &DeviceAjazz{
+				ID:                d.Path,
+				Serial:            d.Serial,
+				Columns:           5,
+				Rows:              3,
+				Keys:              15,
+				Pixels:            85,
+				DPI:               75,
+				Padding:           0,
+				featureReportSize: 32,
+				keyStateOffset:    0,
+				translateKeyIndex: ajazz_to_elgato,
+				flipImage:         rotateCounterclockwise,
+				toImageFormat:     toJPEG,
+			}
 		case d.VendorID == VID_ELGATO && d.ProductID == PID_STREAMDECK:
-			dev = Device{
+			dev = &Device{
 				ID:                   d.Path,
 				Serial:               d.Serial,
 				Columns:              5,
@@ -126,7 +151,7 @@ func Devices() ([]Device, error) {
 				setBrightnessCommand: c_REV1_BRIGHTNESS,
 			}
 		case d.VendorID == VID_ELGATO && (d.ProductID == PID_STREAMDECK_MINI || d.ProductID == PID_STREAMDECK_MINI_MK2):
-			dev = Device{
+			dev = &Device{
 				ID:                   d.Path,
 				Serial:               d.Serial,
 				Columns:              3,
@@ -149,7 +174,7 @@ func Devices() ([]Device, error) {
 				setBrightnessCommand: c_REV1_BRIGHTNESS,
 			}
 		case d.VendorID == VID_ELGATO && (d.ProductID == PID_STREAMDECK_V2 || d.ProductID == PID_STREAMDECK_MK2):
-			dev = Device{
+			dev = &Device{
 				ID:                   d.Path,
 				Serial:               d.Serial,
 				Columns:              5,
@@ -172,7 +197,7 @@ func Devices() ([]Device, error) {
 				setBrightnessCommand: c_REV2_BRIGHTNESS,
 			}
 		case d.VendorID == VID_ELGATO && d.ProductID == PID_STREAMDECK_XL:
-			dev = Device{
+			dev = &Device{
 				ID:                   d.Path,
 				Serial:               d.Serial,
 				Columns:              8,
@@ -196,10 +221,18 @@ func Devices() ([]Device, error) {
 			}
 		}
 
-		if dev.ID != "" {
-			dev.keyState = make([]byte, dev.Columns*dev.Rows)
-			dev.info = d
-			dd = append(dd, dev)
+		if v, ok := dev.(*Device); ok {
+			if v.ID != "" {
+				v.keyState = make([]byte, v.Columns*v.Rows)
+				v.info = d
+				dd = append(dd, dev)
+			}
+		}
+		if v, ok := dev.(*DeviceAjazz); ok {
+			if v.ID != "" {
+				v.info = d
+				dd = append(dd, dev)
+			}
 		}
 	}
 
@@ -238,7 +271,7 @@ func (d Device) Reset() error {
 
 // Clears the Stream Deck, setting a black image on all buttons.
 func (d Device) Clear() error {
-	img := image.NewRGBA(image.Rect(0, 0, int(d.Pixels), int(d.Pixels)))
+	img := image.NewRGBA(image.Rect(0, 0, int(d.GetPixels()), int(d.GetPixels())))
 	draw.Draw(img, img.Bounds(), image.NewUniform(color.RGBA{0, 0, 0, 255}), image.Point{}, draw.Src)
 	for i := uint8(0); i <= d.Columns*d.Rows; i++ {
 		err := d.SetImage(i, img)
@@ -420,9 +453,9 @@ func (d *Device) SetBrightness(percent uint8) error {
 // needs to be in the correct resolution for the device. The index starts with
 // 0 being the top-left button.
 func (d Device) SetImage(index uint8, img image.Image) error {
-	if img.Bounds().Dy() != int(d.Pixels) ||
-		img.Bounds().Dx() != int(d.Pixels) {
-		return fmt.Errorf("supplied image has wrong dimensions, expected %[1]dx%[1]d pixels", d.Pixels)
+	if img.Bounds().Dy() != int(d.GetPixels()) ||
+		img.Bounds().Dx() != int(d.GetPixels()) {
+		return fmt.Errorf("supplied image has wrong dimensions, expected %[1]dx%[1]d pixels", d.GetPixels())
 	}
 
 	imageBytes, err := d.toImageFormat(d.flipImage(img))
@@ -477,6 +510,42 @@ func (d Device) sendFeatureReport(payload []byte) error {
 	copy(b, payload)
 	_, err := d.device.SendFeatureReport(b)
 	return err
+}
+
+func (d Device) GetSerial() string {
+	return d.Serial
+}
+
+func (d Device) GetKeys() uint8 {
+	return d.Keys
+}
+
+func (d Device) GetID() string {
+	return d.ID
+}
+
+func (d Device) GetPixels() uint {
+	return d.Pixels
+}
+
+func (d Device) GetDPI() uint {
+	return d.DPI
+}
+
+func (d Device) GetPadding() uint {
+	return d.Padding
+}
+
+func (d Device) GetColumns() uint8 {
+	return d.Columns
+}
+
+func (d Device) GetRows() uint8 {
+	return d.Rows
+}
+
+func (d Device) Flush() error {
+	return nil
 }
 
 // translateRightToLeft translates the given key index from right-to-left to
@@ -594,7 +663,24 @@ func toJPEG(img image.Image) ([]byte, error) {
 	opts := jpeg.Options{
 		Quality: 100,
 	}
+	// opts := jpeg.EncoderOptions{
+	// 	Quality:         100,
+	// 	OptimizeCoding:  false,
+	// 	ProgressiveMode: false,
+	// 	DCTMethod:       jpeg.DCTFloat,
+	// }
 	err := jpeg.Encode(buffer, img, &opts)
+	if err != nil {
+		return nil, err
+	}
+
+	return buffer.Bytes(), err
+}
+
+// toPNG returns the raw bytes of the given image in PNG format.
+func toPNG(img image.Image) ([]byte, error) {
+	buffer := bytes.NewBuffer([]byte{})
+	err := png.Encode(buffer, img)
 	if err != nil {
 		return nil, err
 	}
